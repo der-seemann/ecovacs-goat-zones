@@ -1,0 +1,17 @@
+{
+  "title": "Goaty Zone Control",
+  "services": {
+    "get_zones": {
+      "name": "Zonen abrufen",
+      "description": "Fragt alle konfigurierten Mähzonen von Goaty ab und speichert sie."
+    },
+    "mow_zone": {
+      "name": "Zone mähen",
+      "description": "Startet den Mähvorgang für eine bestimmte Zone."
+    },
+    "reload_zones": {
+      "name": "Zonen neu laden",
+      "description": "Vergleicht aktuelle Zonen mit gespeicherten, aktualisiert bei Änderung."
+    }
+  }
+}

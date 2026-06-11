@@ -1,0 +1,28 @@
+get_zones:
+  name: "Zonen abrufen"
+  description: "Fragt alle konfigurierten Mähzonen von Goaty ab und speichert sie."
+  fields: {}
+
+mow_zone:
+  name: "Zone mähen"
+  description: "Startet den Mähvorgang für eine bestimmte Zone."
+  fields:
+    zone_id:
+      name: "Zone ID"
+      description: "ID der Zielzone (z.B. 133)"
+      required: true
+      example: "133"
+      selector:
+        text:
+    zone_name:
+      name: "Zonenname"
+      description: "Anzeigename der Zone (für Logs und Status)"
+      required: false
+      example: "Weidenwiese"
+      selector:
+        text:
+
+reload_zones:
+  name: "Zonen neu laden"
+  description: "Vergleicht aktuelle Zonen mit gespeicherten, aktualisiert bei Änderung."
+  fields: {}
