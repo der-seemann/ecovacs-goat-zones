@@ -60,7 +60,7 @@ class GoatyMowingWindowSensor(GoatyCoordinatorSensor):
     """Expose mowing window state."""
 
     def __init__(self, coordinator: GoatyCoordinator) -> None:
-        super().__init__(coordinator, "mowing_window", "Goaty Mähfenster", "mdi:weather-sunset")
+        super().__init__(coordinator, "mowing_window", "Goaty Mahfenster", "mdi:weather-sunset")
 
     @property
     def native_value(self) -> str:
@@ -84,7 +84,7 @@ class GoatyDueZonesSensor(GoatyCoordinatorSensor):
     """Expose the number of due zones."""
 
     def __init__(self, coordinator: GoatyCoordinator) -> None:
-        super().__init__(coordinator, "due_zones", "Goaty Fällige Zonen", "mdi:mower-on")
+        super().__init__(coordinator, "due_zones", "Goaty Fallige Zonen", "mdi:mower-on")
 
     @property
     def native_value(self) -> int:
@@ -122,7 +122,7 @@ class GoatyMowerStateSensor(GoatyCoordinatorSensor):
     """Expose the mower state from Home Assistant."""
 
     def __init__(self, coordinator: GoatyCoordinator) -> None:
-        super().__init__(coordinator, "mower_state", "Goaty Mäherstatus", "mdi:mower")
+        super().__init__(coordinator, "mower_state", "Goaty Mahstatus", "mdi:mower")
 
     @property
     def native_value(self) -> str:

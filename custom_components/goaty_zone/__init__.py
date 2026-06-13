@@ -814,127 +814,147 @@ def _zone_summary_card(zone: dict[str, Any]) -> dict[str, Any]:
 def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
     mower_entity_id = str(config.get("mower_entity_id") or "").strip()
     mower_entity_id = mower_entity_id or "lawn_mower.goaty"
-    zone_cards = [_zone_summary_card(zone) for zone in zones]
-    if not zone_cards:
-        zone_cards = [
-            {
-                "type": "markdown",
-                "content": "Noch keine Zonen vorhanden. Erst Zonen abrufen, dann Dashboard neu erzeugen.",
-            }
-        ]
-
-    overview_cards = [
+    zone_cards = [_zone_summary_card(zone) for zone in zones] or [
         {
-            "type": "custom:goaty-map-card",
-            "title": title,
-            "hours": 24,
-            "position_update": 15,
-        },
-        {
-            "type": "custom:goaty-zones-card",
-            "title": title,
-            "zones_entity": "sensor.goaty_zones",
-            "mower_entity": mower_entity_id,
-            "mow_domain": DOMAIN,
-            "mow_service": "mow_zone",
-            "reload_domain": DOMAIN,
-            "reload_service": "reload_zones",
-        },
-        {
-            "type": "entities",
-            "title": "Goaty Status",
-            "show_header_toggle": False,
-            "entities": [
-                "sensor.goaty_mahfenster",
-                "sensor.goaty_fallige_zonen",
-                "sensor.goaty_gesperrte_zonen",
-                "sensor.goaty_maherstatus",
-                "sensor.goaty_position_x",
-                "sensor.goaty_position_y",
-                "sensor.goaty_position_heading",
-            ],
-        },
-        {
-            "type": "grid",
-            "title": "Schnellzugriff",
-            "columns": 3,
-            "square": False,
-            "cards": [
-                _button_card(
-                    name="Pause",
-                    icon="mdi:pause",
-                    service="lawn_mower.pause",
-                    data={"entity_id": mower_entity_id},
-                    entity="button.goaty_pause",
-                ),
-                _button_card(
-                    name="Dock",
-                    icon="mdi:home-import-outline",
-                    service="lawn_mower.dock",
-                    data={"entity_id": mower_entity_id},
-                    entity="button.goaty_dock",
-                ),
-                _button_card(
-                    name="Mähzonen laden",
-                    icon="mdi:reload",
-                    service=f"{DOMAIN}.reload_zones",
-                    data={},
-                ),
-            ],
-        },
-    ]
-
-    maintenance_cards = [
-        {
-            "type": "grid",
-            "title": "Wartung",
-            "columns": 2,
-            "square": False,
-            "cards": [
-                _button_card(
-                    name="Zonen abrufen",
-                    icon="mdi:download",
-                    service=f"{DOMAIN}.get_zones",
-                    data={},
-                ),
-                _button_card(
-                    name="Dashboard neu bauen",
-                    icon="mdi:view-dashboard",
-                    service=f"{DOMAIN}.create_dashboard",
-                    data={"dashboard_title": title, "overwrite": True},
-                ),
-            ],
+            "type": "markdown",
+            "content": "Noch keine Zonen vorhanden. Erst Zonen abrufen, dann Dashboard neu bauen.",
         }
     ]
 
+    zone_buttons = [
+        _button_card(
+            name="Mähen starten",
+            icon="mdi:mower-on",
+            service="button.press",
+            data={"entity_id": "button.goaty_mahen"},
+        ),
+    ]
+
     return {
+        "version": 1,
+        "strategy": None,
         "title": title,
         "url_path": slug,
-        "icon": "mdi:mower",
+        "icon": "mdi:robot-mower",
         "show_in_sidebar": True,
         "mode": "storage",
         "views": [
             {
-                "title": "Übersicht",
-                "path": "overview",
-                "icon": "mdi:mower",
-                "type": "masonry",
-                "cards": overview_cards,
-            },
-            {
-                "title": "Zonen",
-                "path": "zonen",
-                "icon": "mdi:map-legend",
-                "type": "masonry",
-                "cards": zone_cards,
-            },
-            {
-                "title": "Wartung",
-                "path": "wartung",
-                "icon": "mdi:wrench",
-                "type": "masonry",
-                "cards": maintenance_cards,
-            },
+                "type": "sections",
+                "max_columns": 2,
+                "title": title,
+                "path": slug,
+                "icon": "mdi:robot-mower",
+                "sections": [
+                    {
+                        "type": "grid",
+                        "cards": [
+                            {
+                                "type": "custom:goaty-map-card",
+                                "title": title,
+                                "hours": 24,
+                                "position_update": 15,
+                            },
+                            {
+                                "type": "custom:goaty-zones-card",
+                                "title": title,
+                                "zones_entity": "sensor.goaty_zones",
+                                "mower_entity": mower_entity_id,
+                                "mow_domain": DOMAIN,
+                                "mow_service": "mow_zone",
+                                "reload_domain": DOMAIN,
+                                "reload_service": "reload_zones",
+                            },
+                            {
+                                "type": "tile",
+                                "entity": mower_entity_id,
+                                "name": title,
+                                "features": [{"type": "lawn-mower-commands"}],
+                            },
+                            {
+                                "type": "vertical-stack",
+                                "cards": [
+                                    {
+                                        "type": "entities",
+                                        "title": "Gezielt mähen",
+                                        "show_header_toggle": False,
+                                        "entities": [
+                                            "select.goaty_mahzone",
+                                            "select.goaty_mahrichtung",
+                                        ],
+                                    },
+                                    {
+                                        "type": "button",
+                                        "name": "Mähen starten",
+                                        "icon": "mdi:mower-on",
+                                        "tap_action": {
+                                            "action": "call-service",
+                                            "service": "button.press",
+                                            "service_data": {"entity_id": "button.goaty_mahen"},
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "type": "grid",
+                        "cards": [
+                            {
+                                "type": "entities",
+                                "title": "Mähautomatik",
+                                "show_header_toggle": False,
+                                "entities": [
+                                    {"entity": "sensor.goaty_mahfenster", "name": "Mähfenster"},
+                                    {"entity": "sensor.goaty_fallige_zonen", "name": "Fällige Zonen"},
+                                    {"entity": "sensor.goaty_gesperrte_zonen", "name": "Gesperrte Zonen"},
+                                    {"entity": "sensor.goaty_mahstatus", "name": "Status"},
+                                    {"entity": "sensor.goaty_position_x", "name": "Position X"},
+                                    {"entity": "sensor.goaty_position_y", "name": "Position Y"},
+                                    {"entity": "sensor.goaty_position_heading", "name": "Heading"},
+                                ],
+                            },
+                            {
+                                "type": "entities",
+                                "title": "Wartung",
+                                "show_header_toggle": False,
+                                "entities": [
+                                    {"entity": "input_text.goaty_current_zone_name", "name": "Aktive Zone"},
+                                    {"entity": "input_text.goaty_current_zone_id", "name": "Aktive Zone ID"},
+                                    {"entity": "input_boolean.goaty_zone_active", "name": "Zonenmodus"},
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "type": "grid",
+                        "cards": zone_cards,
+                    },
+                    {
+                        "type": "grid",
+                        "cards": [
+                            _button_card(
+                                name="Zonen abrufen",
+                                icon="mdi:download",
+                                service=f"{DOMAIN}.get_zones",
+                                data={},
+                            ),
+                            _button_card(
+                                name="Dashboard neu bauen",
+                                icon="mdi:view-dashboard",
+                                service=f"{DOMAIN}.create_dashboard",
+                                data={"dashboard_title": title, "overwrite": True},
+                            ),
+                            _button_card(
+                                name="Mähzonen laden",
+                                icon="mdi:reload",
+                                service=f"{DOMAIN}.reload_zones",
+                                data={},
+                            ),
+                        ],
+                    },
+                ],
+            }
         ],
     }
 
@@ -1406,7 +1426,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         if ZONE_STORE is None:
             return {"created": False, "reason": "zone_store_unavailable"}
         title = str(call.data.get("dashboard_title") or DEFAULT_DEVICE_NAME).strip() or DEFAULT_DEVICE_NAME
-        slug = _slugify_title(title)
+        slug = "goaty"
         overwrite = bool(call.data.get("overwrite", False))
         config = {}
         domain_data = hass.data.get(DOMAIN)

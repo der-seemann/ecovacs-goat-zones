@@ -57,7 +57,7 @@ class GoatyZoneSelect(CoordinatorEntity[GoatyCoordinator], SelectEntity):
     """Select a zone for subsequent operations."""
 
     _attr_has_entity_name = False
-    _attr_name = "Goaty Mähzone"
+    _attr_name = "Goaty Mahzone"
     _attr_icon = "mdi:map-marker"
 
     def __init__(self, coordinator: GoatyCoordinator, entry: ConfigEntry, store: Any) -> None:
@@ -102,7 +102,7 @@ class GoatyDirectionSelect(CoordinatorEntity[GoatyCoordinator], SelectEntity):
     """Select the mow direction for the selected zone."""
 
     _attr_has_entity_name = False
-    _attr_name = "Goaty Mährichtung"
+    _attr_name = "Goaty Mahrichtung"
     _attr_icon = "mdi:compass"
 
     def __init__(
