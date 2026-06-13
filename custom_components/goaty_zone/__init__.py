@@ -15,9 +15,12 @@ import voluptuous as vol
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
+
+from .coordinator import GoatyCoordinator
 
 DOMAIN = "goaty_zone"
 ECOVACS_DOMAIN = "ecovacs"
@@ -995,14 +998,34 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Store config entry data for the future phased refactor."""
+    """Set up the config entry and forward entity platforms."""
+    if ZONE_STORE is None:
+        raise RuntimeError("Goaty zone store not initialized")
+
+    coordinator = GoatyCoordinator(hass, entry, ZONE_STORE)
+    await coordinator.async_config_entry_first_refresh()
+
+    entry.runtime_data = {
+        "coordinator": coordinator,
+        "zone_store": ZONE_STORE,
+    }
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = dict(entry.data)
+    await hass.config_entries.async_forward_entry_setups(
+        entry,
+        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON],
+    )
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry,
+        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON],
+    )
     domain_data = hass.data.get(DOMAIN)
     if isinstance(domain_data, dict):
         domain_data.pop(entry.entry_id, None)
-    return True
+    if hasattr(entry, "runtime_data"):
+        entry.runtime_data = None
+    return unload_ok
