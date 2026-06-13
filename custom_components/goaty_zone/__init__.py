@@ -13,7 +13,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -28,6 +28,8 @@ ECOVACS_DOMAIN = "ecovacs"
 DEFAULT_DEVICE_NAME = "Goaty"
 CARD_RESOURCE_PATH = "/local/goaty-zones-card.js"
 CARD_SOURCE = "custom_components/goaty_zone/www/goaty-zones-card.js"
+MAP_CARD_RESOURCE_PATH = "/local/goaty-map-card.js"
+MAP_CARD_SOURCE = "custom_components/goaty_zone/www/goaty-map-card.js"
 STORAGE_KEY = "goaty_zone.zone_config"
 STORAGE_VERSION = 1
 POSITION_DUMP_PATH = Path("/config/goaty_position_live_last.json")
@@ -39,6 +41,7 @@ EMPTY_SELECT_OPTION = "Keine Zonen"
 _LOGGER = logging.getLogger(__name__)
 GOATY_SENSOR: "GoatyZonesSensor | None" = None
 ZONE_STORE: "GoatyZoneStore | None" = None
+VIEWS_REGISTERED = False
 
 
 def _configured_device_name(hass: HomeAssistant) -> str:
@@ -52,6 +55,180 @@ def _configured_device_name(hass: HomeAssistant) -> str:
         if mower_entity_id:
             return mower_entity_id
     return DEFAULT_DEVICE_NAME
+
+
+def _card_paths() -> list[tuple[str, str]]:
+    return [
+        (CARD_RESOURCE_PATH, CARD_SOURCE),
+        (MAP_CARD_RESOURCE_PATH, MAP_CARD_SOURCE),
+    ]
+
+
+async def _register_goaty_card_resources(hass: HomeAssistant) -> None:
+    for resource_path, source_path in _card_paths():
+        www_path = hass.config.path(source_path)
+        if not os.path.exists(www_path):
+            continue
+        try:
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(resource_path, www_path, cache_headers=False)]
+            )
+        except Exception:
+            _LOGGER.exception("Failed to register Goaty card static path: %s", resource_path)
+        try:
+            from homeassistant.components.frontend import async_register_extra_module_url
+
+            result = async_register_extra_module_url(hass, resource_path)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            _LOGGER.debug("Frontend extra module registration not available for %s", resource_path, exc_info=True)
+
+
+class GoatyConfigView(HomeAssistantView):
+    """GET /api/goaty_zone/config."""
+
+    url = "/api/goaty_zone/config"
+    name = "api:goaty_zone:config"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        self._hass = hass
+        self._entry_id = entry_id
+
+    async def get(self, request: Any) -> Any:
+        domain_data = self._hass.data.get(DOMAIN, {})
+        entry_data = domain_data.get(self._entry_id, {}) if isinstance(domain_data, dict) else {}
+        cfg = dict(entry_data.get("config") or {})
+        cal = dict(cfg.get("calibration") or {})
+        return self.json(
+            {
+                "image_path": cfg.get("image_path"),
+                "charger_px_x": cal.get("charger_px_x", 0),
+                "charger_px_y": cal.get("charger_px_y", 0),
+                "px_per_m_x": cal.get("px_per_m_x", 22.48),
+                "px_per_m_y": cal.get("px_per_m_y", 22.48),
+                "img_width": cal.get("img_width", 1452),
+                "img_height": cal.get("img_height", 2000),
+                "position_x_entity": "sensor.goaty_position_x",
+                "position_y_entity": "sensor.goaty_position_y",
+                "heading_entity": "sensor.goaty_position_heading",
+            }
+        )
+
+
+class GoatyPathView(HomeAssistantView):
+    """GET /api/goaty_zone/path."""
+
+    url = "/api/goaty_zone/path"
+    name = "api:goaty_zone:path"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: Any) -> Any:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import get_significant_states
+
+        params = request.rel_url.query
+        hours_raw = params.get("hours", 24)
+        date_str = params.get("date")
+        try:
+            hours = max(1, int(hours_raw))
+        except (TypeError, ValueError):
+            hours = 24
+
+        if date_str:
+            try:
+                day = datetime.fromisoformat(str(date_str))
+            except ValueError:
+                return self.json({"error": "invalid date"}, status_code=400)
+            if day.tzinfo is None:
+                day = day.replace(tzinfo=timezone.utc)
+            start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = day.replace(hour=23, minute=59, second=59, microsecond=999999)
+        else:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(hours=hours)
+
+        entity_ids = [
+            "sensor.goaty_position_x",
+            "sensor.goaty_position_y",
+            "sensor.goaty_position_heading",
+        ]
+
+        try:
+            recorder = get_instance(self._hass)
+            history = await recorder.async_add_executor_job(
+                get_significant_states,
+                self._hass,
+                start,
+                end,
+                entity_ids,
+                None,
+                True,
+                False,
+                False,
+            )
+        except Exception:
+            _LOGGER.debug("Goaty path history unavailable", exc_info=True)
+            return self.json({"points": [], "count": 0, "start": start.isoformat(), "end": end.isoformat()})
+
+        def _timeline(entity_id: str) -> list[tuple[datetime, float]]:
+            items: list[tuple[datetime, float]] = []
+            for state in history.get(entity_id, []):
+                if state.state in ("unknown", "unavailable", None):
+                    continue
+                try:
+                    value = float(state.state)
+                except (TypeError, ValueError):
+                    continue
+                ts = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
+                if ts is None:
+                    continue
+                items.append((ts, value))
+            items.sort(key=lambda item: item[0])
+            return items
+
+        x_points = _timeline("sensor.goaty_position_x")
+        y_points = _timeline("sensor.goaty_position_y")
+        h_points = _timeline("sensor.goaty_position_heading")
+        if not x_points or not y_points:
+            return self.json({"points": [], "count": 0, "start": start.isoformat(), "end": end.isoformat()})
+
+        y_idx = 0
+        h_idx = 0
+        last_y: float | None = None
+        last_h: float | None = None
+        points: list[dict[str, Any]] = []
+
+        for ts, x in x_points:
+            while y_idx < len(y_points) and y_points[y_idx][0] <= ts:
+                last_y = y_points[y_idx][1]
+                y_idx += 1
+            while h_idx < len(h_points) and h_points[h_idx][0] <= ts:
+                last_h = h_points[h_idx][1]
+                h_idx += 1
+            if last_y is None:
+                continue
+            points.append(
+                {
+                    "ts": ts.isoformat(),
+                    "x": x,
+                    "y": last_y,
+                    "h": last_h if last_h is not None else 0.0,
+                }
+            )
+
+        return self.json(
+            {
+                "points": points,
+                "count": len(points),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            }
+        )
 
 
 class GoatyZonesSensor(SensorEntity):
@@ -892,20 +1069,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     ZONE_STORE = GoatyZoneStore(hass)
     await ZONE_STORE.async_load()
 
-    www_path = hass.config.path(CARD_SOURCE)
-    if os.path.exists(www_path):
-        try:
-            await hass.http.async_register_static_paths(
-                [StaticPathConfig(CARD_RESOURCE_PATH, www_path, cache_headers=False)]
-            )
-        except Exception:
-            _LOGGER.exception("Failed to register Goaty card static path")
-        try:
-            from homeassistant.components.frontend import async_register_extra_module_url
-
-            async_register_extra_module_url(hass, CARD_RESOURCE_PATH)
-        except Exception:
-            _LOGGER.debug("Frontend extra module registration not available", exc_info=True)
+    await _register_goaty_card_resources(hass)
 
     await _restore_sensor_from_cache(hass)
 
@@ -1099,6 +1263,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the config entry and forward entity platforms."""
+    global VIEWS_REGISTERED
     if ZONE_STORE is None:
         raise RuntimeError("Goaty zone store not initialized")
 
@@ -1117,6 +1282,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "position": position,
         "zone_update_callbacks": [],
     }
+    if not VIEWS_REGISTERED:
+        hass.http.register_view(GoatyConfigView(hass, entry.entry_id))
+        hass.http.register_view(GoatyPathView(hass))
+        VIEWS_REGISTERED = True
     await hass.config_entries.async_forward_entry_setups(
         entry,
         [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON],
