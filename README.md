@@ -1,4 +1,4 @@
-# ha-goaty
+# Ecovacs GOAT Zones
 
 Custom Home Assistant integration for Ecovacs GOAT zone control.
 
@@ -6,14 +6,14 @@ Custom Home Assistant integration for Ecovacs GOAT zone control.
 
 - `custom_components/goaty_zone/`
 - `custom_components/goaty_zone/www/goaty-zones-card.js`
-- `example_packages/goaty_automations.yaml`
+- `docs/legacy_yaml_backup.md`
 - `hacs.json`
 
 ## First setup in Home Assistant
 
 1. Install the integration via HACS or copy it into `/config/custom_components/goaty_zone/`.
 2. Restart Home Assistant.
-3. Add `Goaty Zone Control` via Settings -> Devices & services.
+3. Add `Ecovacs GOAT Zones` via Settings -> Devices & services.
 4. Open Developer Tools -> Services and run `goaty_zone.get_zones` once.
 5. Open Developer Tools -> Services and run `goaty_zone.create_dashboard` once.
 
@@ -44,5 +44,4 @@ If zones change later, run `goaty_zone.create_dashboard` again with `overwrite: 
 - `input_text.goaty_zones_json` and `input_text.goaty_zones_hash` remain only as compatibility/debug mirrors.
 - `goaty_zone.get_due_zones` is the service to use from automations.
 - `goaty_zone.create_dashboard` writes a dynamic Lovelace dashboard with `goaty-map-card`, `goaty-zones-card`, zone status, and maintenance sections.
-- `example_packages/goaty_automations.yaml` is a template and must be adapted to the real zone IDs.
 - There are no per-zone scripts or `shell_command.goaty_*` helpers left in the repo.

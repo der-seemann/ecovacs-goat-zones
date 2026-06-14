@@ -1,10 +1,10 @@
 {
   "domain": "goaty_zone",
-  "name": "Goaty Zone Control",
+  "name": "Ecovacs GOAT Zones",
   "version": "1.0.0",
   "config_flow": true,
-  "documentation": "https://github.com/der-seemann/ha-goaty",
-  "issue_tracker": "https://github.com/der-seemann/ha-goaty/issues",
+  "documentation": "https://github.com/der-seemann/ecovacs-goat-zones",
+  "issue_tracker": "https://github.com/der-seemann/ecovacs-goat-zones/issues",
   "requirements": [],
   "dependencies": ["ecovacs"],
   "codeowners": ["@der-seemann"],

@@ -14,6 +14,7 @@ from typing import Any
 
 import voluptuous as vol
 
+from homeassistant.components import frontend
 from homeassistant.components.http import HomeAssistantView, StaticPathConfig
 from homeassistant.components.lovelace import dashboard as lovelace_dashboard
 from homeassistant.components.sensor import SensorEntity
