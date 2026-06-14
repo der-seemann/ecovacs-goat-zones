@@ -1124,27 +1124,54 @@ def _zone_summary_card(zone: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
-    mower_entity_id = str(config.get("mower_entity_id") or "").strip()
-    mower_entity_id = mower_entity_id or "lawn_mower.goaty"
-    enriched_zones = [
-        {"id": str(zone_id), **dict(zone)}
-        for zone_id, zone in config.get("zones_map", {}).items()
-    ] if isinstance(config.get("zones_map"), dict) else zones
+def _build_dashboard(
+    hass: HomeAssistant,
+    title: str,
+    slug: str,
+    zones: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    mower_entity_id = str(config.get("mower_entity_id") or "").strip() or "lawn_mower.goaty"
+    mowing_window_entity = _preferred_state_entity(
+        hass,
+        "binary_sensor.goaty_mahfenster_aktiv",
+        "sensor.goaty_mahfenster",
+    )
+    due_zones_entity = _preferred_state_entity(
+        hass,
+        "sensor.goaty_fallige_zonen_2",
+        "sensor.goaty_fallige_zones",
+    )
+    locked_zones_entity = _preferred_state_entity(
+        hass,
+        "sensor.goaty_gesperrte_zonen_2",
+        "sensor.goaty_gesperrte_zones",
+    )
+    mower_status_entity = _preferred_state_entity(
+        hass,
+        "sensor.goaty_mahstatus_2",
+        "sensor.goaty_mahstatus",
+    )
+    mower_fault_entity = _preferred_state_entity(
+        hass,
+        "sensor.goaty_fehler",
+        "sensor.goaty_effektiver_fehler",
+    )
+    active_zone_entity = _preferred_state_entity(
+        hass,
+        "input_text.goaty_current_zone_name",
+        "input_text.goaty_last_started_zone_name",
+    )
+    enriched_zones = (
+        [{"id": str(zone_id), **dict(zone)} for zone_id, zone in config.get("zones_map", {}).items()]
+        if isinstance(config.get("zones_map"), dict)
+        else zones
+    )
     zone_cards = [_zone_summary_card(zone) for zone in enriched_zones] or [
         {
             "type": "markdown",
             "content": "Noch keine Zonen vorhanden. Erst Zonen abrufen, dann Dashboard neu bauen.",
         }
-    ]
-
-    zone_buttons = [
-        _button_card(
-            name="Mähen starten",
-            icon="mdi:mower-on",
-            service="button.press",
-            data={"entity_id": "button.goaty_mahen"},
-        ),
     ]
 
     return {
@@ -1165,6 +1192,7 @@ def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config:
                 "sections": [
                     {
                         "type": "grid",
+                        "title": "Steuerung",
                         "cards": [
                             {
                                 "type": "custom:goaty-map-card",
@@ -1177,6 +1205,11 @@ def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config:
                                 "title": title,
                                 "zones_entity": "sensor.goaty_zones",
                                 "mower_entity": mower_entity_id,
+                                "battery_entity": "sensor.goaty_batterie",
+                                "status_entity": mower_status_entity,
+                                "fault_entity": mower_fault_entity,
+                                "active_zone_entity": active_zone_entity,
+                                "zone_active_bool": "input_boolean.goaty_zone_active",
                                 "mow_domain": DOMAIN,
                                 "mow_service": "mow_zone",
                                 "reload_domain": DOMAIN,
@@ -1198,17 +1231,40 @@ def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config:
                                         "entities": [
                                             "select.goaty_mahzone",
                                             "select.goaty_mahrichtung",
+                                            {
+                                                "entity": "input_boolean.goaty_mowing_auto_enabled",
+                                                "name": "Automatik",
+                                            },
+                                            {
+                                                "entity": active_zone_entity,
+                                                "name": "Aktive Zone",
+                                            },
                                         ],
                                     },
                                     {
-                                        "type": "button",
-                                        "name": "Mähen starten",
-                                        "icon": "mdi:mower-on",
-                                        "tap_action": {
-                                            "action": "call-service",
-                                            "service": "button.press",
-                                            "service_data": {"entity_id": "button.goaty_mahen"},
-                                        },
+                                        "type": "grid",
+                                        "columns": 3,
+                                        "square": False,
+                                        "cards": [
+                                            _button_card(
+                                                name="Mähen starten",
+                                                icon="mdi:mower-on",
+                                                service="button.press",
+                                                data={"entity_id": "button.goaty_mahen"},
+                                            ),
+                                            _button_card(
+                                                name="Pause",
+                                                icon="mdi:pause",
+                                                service="button.press",
+                                                data={"entity_id": "button.goaty_pause"},
+                                            ),
+                                            _button_card(
+                                                name="Dock",
+                                                icon="mdi:home-map-marker",
+                                                service="button.press",
+                                                data={"entity_id": "button.goaty_dock"},
+                                            ),
+                                        ],
                                     },
                                 ],
                             },
@@ -1216,16 +1272,17 @@ def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config:
                     },
                     {
                         "type": "grid",
+                        "title": "Status",
                         "cards": [
                             {
                                 "type": "entities",
                                 "title": "Mähautomatik",
                                 "show_header_toggle": False,
                                 "entities": [
-                                    {"entity": "sensor.goaty_mahfenster", "name": "Mähfenster"},
-                                    {"entity": "sensor.goaty_fallige_zonen", "name": "Fällige Zonen"},
-                                    {"entity": "sensor.goaty_gesperrte_zonen", "name": "Gesperrte Zonen"},
-                                    {"entity": "sensor.goaty_mahstatus", "name": "Status"},
+                                    {"entity": mowing_window_entity, "name": "Mähfenster"},
+                                    {"entity": due_zones_entity, "name": "Fällige Zonen"},
+                                    {"entity": locked_zones_entity, "name": "Gesperrte Zonen"},
+                                    {"entity": mower_status_entity, "name": "Status"},
                                     {"entity": "sensor.goaty_position_x", "name": "Position X"},
                                     {"entity": "sensor.goaty_position_y", "name": "Position Y"},
                                     {"entity": "sensor.goaty_position_heading", "name": "Heading"},
@@ -1245,10 +1302,12 @@ def _build_dashboard(title: str, slug: str, zones: list[dict[str, Any]], config:
                     },
                     {
                         "type": "grid",
+                        "title": "Zonen",
                         "cards": zone_cards,
                     },
                     {
                         "type": "grid",
+                        "title": "Aktionen",
                         "cards": [
                             _button_card(
                                 name="Zonen abrufen",
@@ -1606,6 +1665,17 @@ def _dashboard_store_key(slug: str) -> str:
     return f"lovelace.{slug}"
 
 
+def _preferred_state_entity(hass: HomeAssistant, *candidates: str) -> str:
+    for entity_id in candidates:
+        state = hass.states.get(entity_id)
+        if state is not None and state.state not in {"unknown", "unavailable"}:
+            return entity_id
+    for entity_id in candidates:
+        if entity_id:
+            return entity_id
+    return ""
+
+
 def _register_goaty_dashboard(
     hass: HomeAssistant, slug: str, dashboard_config: dict[str, Any], update: bool
 ) -> None:
@@ -1772,7 +1842,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         zones_map = ZONE_STORE.get_all()
         zones = [{"id": zone_id, **dict(zone)} for zone_id, zone in zones_map.items()]
         config["zones_map"] = zones_map
-        dashboard = _build_dashboard(title, slug, zones, config)
+        dashboard = _build_dashboard(hass, title, slug, zones, config)
         existing = await _load_existing_dashboard(hass, slug)
         if existing and not overwrite:
             await hass.services.async_call(
