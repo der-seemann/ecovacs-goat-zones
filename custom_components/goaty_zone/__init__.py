@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,10 @@ EMPTY_SELECT_OPTION = "Keine Zonen"
 _LOGGER = logging.getLogger(__name__)
 GOATY_SENSOR: "GoatyZonesSensor | None" = None
 ZONE_STORE: "GoatyZoneStore | None" = None
+GOATY_HASS: HomeAssistant | None = None
+_ORIGINAL_MQTT_HANDLE_ATR: Callable[[Any, list[str], bytes], None] | None = None
+_MQTT_ATR_HOOK_REFCOUNT = 0
+_GOATY_TARGET_DIDS: set[str] = set()
 
 
 def _configured_device_name(hass: HomeAssistant) -> str:
@@ -55,6 +60,199 @@ def _configured_device_name(hass: HomeAssistant) -> str:
         if mower_entity_id:
             return mower_entity_id
     return DEFAULT_DEVICE_NAME
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if text:
+            return text
+    return None
+
+
+def _extract_clean_info_zone(payload: Any) -> tuple[str, str | None] | None:
+    """Extract a zone id and optional name from a clean-info MQTT payload."""
+
+    if isinstance(payload, (bytes, bytearray)):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+    elif isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+
+    if isinstance(payload, list):
+        for item in payload:
+            zone = _extract_clean_info_zone(item)
+            if zone is not None:
+                return zone
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    content = payload.get("content")
+    if isinstance(content, dict):
+        zone_type = _first_text(content.get("type"), payload.get("type"))
+        if zone_type == "spotArea":
+            zone_id = _first_text(
+                content.get("value"),
+                content.get("zone_id"),
+                content.get("id"),
+                payload.get("zone_id"),
+                payload.get("id"),
+                payload.get("value"),
+            )
+            if not zone_id:
+                return None
+            zone_name = _first_text(
+                content.get("name"),
+                content.get("zone_name"),
+                content.get("areaName"),
+                payload.get("name"),
+                payload.get("zone_name"),
+            )
+            return zone_id, zone_name
+
+    for key in ("body", "data", "report", "payload", "message", "cleanState"):
+        zone = _extract_clean_info_zone(payload.get(key))
+        if zone is not None:
+            return zone
+
+    for nested in payload.values():
+        zone = _extract_clean_info_zone(nested)
+        if zone is not None:
+            return zone
+
+    return None
+
+
+def _current_known_zone_entries() -> list[dict[str, str]]:
+    if ZONE_STORE is None:
+        return []
+
+    zones = []
+    for zone_id, cfg in ZONE_STORE.get_all().items():
+        zone_name = str(cfg.get("name") or zone_id).strip() or str(zone_id)
+        zones.append({"id": str(zone_id), "name": zone_name})
+    return sorted(zones, key=lambda zone: _zone_sort_key(zone["id"]))
+
+
+async def _learn_zone_from_clean_info(hass: HomeAssistant, zone_id: str, zone_name: str | None) -> bool:
+    if ZONE_STORE is None:
+        return False
+
+    zone_id = str(zone_id).strip()
+    if not zone_id or not zone_id.isdecimal():
+        return False
+
+    desired_name = str(zone_name or "").strip() or f"Zone {zone_id}"
+    zones = _current_known_zone_entries()
+    existing = next((zone for zone in zones if zone["id"] == zone_id), None)
+
+    if existing is None:
+        zones.append({"id": zone_id, "name": desired_name})
+    elif zone_name and existing.get("name") != desired_name:
+        existing["name"] = desired_name
+    else:
+        return False
+
+    normalized_zones = sorted(zones, key=lambda zone: _zone_sort_key(zone["id"]))
+    await _store_zones(hass, normalized_zones, force_update=True)
+    _LOGGER.info(
+        "GOAT zone learned from clean info: id=%s name=%s",
+        zone_id,
+        desired_name,
+    )
+    await hass.services.async_call(
+        "persistent_notification",
+        "create",
+        {
+            "title": "Goaty - Zone erkannt",
+            "message": (
+                f"Zone {zone_id} ({desired_name}) wurde automatisch erkannt und gespeichert. "
+                "Der Name kann bei Bedarf über goaty_zone.set_zone_config angepasst werden."
+            ),
+            "notification_id": f"goaty_zone_learned_{zone_id}",
+        },
+        blocking=True,
+    )
+    return True
+
+
+def _maybe_schedule_clean_info_learning(
+    topic_split: list[str],
+    payload: bytes,
+) -> None:
+    if GOATY_HASS is None or len(topic_split) < 4:
+        return
+    if not str(topic_split[2]).startswith("onCleanInfo"):
+        return
+
+    did = str(topic_split[3]).strip()
+    if _GOATY_TARGET_DIDS and did not in _GOATY_TARGET_DIDS:
+        return
+
+    zone = _extract_clean_info_zone(payload)
+    if zone is None:
+        return
+
+    zone_id, zone_name = zone
+    GOATY_HASS.async_create_task(_learn_zone_from_clean_info(GOATY_HASS, zone_id, zone_name))
+
+
+def _install_clean_info_hook(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    global GOATY_HASS, _ORIGINAL_MQTT_HANDLE_ATR, _MQTT_ATR_HOOK_REFCOUNT
+
+    GOATY_HASS = hass
+    _MQTT_ATR_HOOK_REFCOUNT += 1
+
+    try:
+        device = _find_device(hass, _configured_device_name(hass))
+    except Exception as exc:
+        _LOGGER.warning("GOAT clean-info hook installed without device filter: %s", exc)
+    else:
+        did = str(getattr(device, "device_info", {}).get("did") or "").strip()
+        if did:
+            _GOATY_TARGET_DIDS.add(did)
+            _LOGGER.info("GOAT clean-info hook watching did=%s", did)
+
+    if _MQTT_ATR_HOOK_REFCOUNT > 1 or _ORIGINAL_MQTT_HANDLE_ATR is not None:
+        return
+
+    from deebot_client.mqtt_client import MqttClient
+
+    _ORIGINAL_MQTT_HANDLE_ATR = MqttClient._handle_atr
+
+    def _wrapped_handle_atr(self: Any, topic_split: list[str], payload: bytes) -> None:
+        try:
+            _maybe_schedule_clean_info_learning(topic_split, payload)
+        except Exception:
+            _LOGGER.exception("GOAT clean-info hook failed")
+        assert _ORIGINAL_MQTT_HANDLE_ATR is not None
+        _ORIGINAL_MQTT_HANDLE_ATR(self, topic_split, payload)
+
+    MqttClient._handle_atr = _wrapped_handle_atr  # type: ignore[method-assign]
+
+
+def _uninstall_clean_info_hook() -> None:
+    global _ORIGINAL_MQTT_HANDLE_ATR, _MQTT_ATR_HOOK_REFCOUNT
+
+    _MQTT_ATR_HOOK_REFCOUNT = max(0, _MQTT_ATR_HOOK_REFCOUNT - 1)
+    if _MQTT_ATR_HOOK_REFCOUNT > 0:
+        return
+
+    if _ORIGINAL_MQTT_HANDLE_ATR is None:
+        return
+
+    from deebot_client.mqtt_client import MqttClient
+
+    MqttClient._handle_atr = _ORIGINAL_MQTT_HANDLE_ATR  # type: ignore[method-assign]
+    _ORIGINAL_MQTT_HANDLE_ATR = None
+    _GOATY_TARGET_DIDS.clear()
 
 
 def _card_paths() -> list[tuple[str, str]]:
@@ -1596,6 +1794,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = GoatyCoordinator(hass, entry, ZONE_STORE)
     await coordinator.async_config_entry_first_refresh()
     position = await _restore_last_goat_position(hass)
+    _install_clean_info_hook(hass, entry)
 
     entry.runtime_data = {
         "coordinator": coordinator,
@@ -1626,4 +1825,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         domain_data.pop(entry.entry_id, None)
     if hasattr(entry, "runtime_data"):
         entry.runtime_data = None
+    _uninstall_clean_info_hook()
     return unload_ok
