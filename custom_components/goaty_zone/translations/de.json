@@ -58,6 +58,31 @@
           "rain_sensor": "Regensensor"
         }
       },
+      "gps": {
+        "title": "GPS-Kalibrierung",
+        "description": "Lege die Dock-Position und die Ausrichtung der lokalen X-Achse fest.",
+        "data": {
+          "dock_latitude": "Dock Breite",
+          "dock_longitude": "Dock Länge",
+          "rotation_offset_deg": "Rotationsoffset (Grad)",
+          "invert_y_axis": "Y-Achse invertieren",
+          "mode": "Kalibrierungsmodus"
+        }
+      },
+      "gps_two_point": {
+        "title": "2-Punkt-Kalibrierung",
+        "description": "Gib zwei bekannte lokale Punkte plus ihre echten GPS-Koordinaten ein.",
+        "data": {
+          "local_x1": "Punkt 1 lokal X",
+          "local_y1": "Punkt 1 lokal Y",
+          "real_lat1": "Punkt 1 Breite",
+          "real_lon1": "Punkt 1 Länge",
+          "local_x2": "Punkt 2 lokal X",
+          "local_y2": "Punkt 2 lokal Y",
+          "real_lat2": "Punkt 2 Breite",
+          "real_lon2": "Punkt 2 Länge"
+        }
+      },
       "finish": {
         "title": "Fertig",
         "description": "Prüfe die Zusammenfassung und lege die Integration an."
@@ -73,7 +98,8 @@
       "file_not_found": "Datei nicht gefunden",
       "invalid_coordinates": "Ungültige Koordinaten",
       "invalid_timewindow": "Ungültiges Zeitfenster",
-      "invalid_mode": "Ungültiger Modus"
+      "invalid_mode": "Ungültiger Modus",
+      "invalid_gps": "Ungültige GPS-Kalibrierung"
     },
     "abort": {
       "no_mower_entities": "Keine lawn_mower-Entitäten gefunden",
@@ -97,6 +123,38 @@
     "create_dashboard": {
       "name": "Dashboard erstellen",
       "description": "Erstellt oder überschreibt das dynamische Goaty-Dashboard."
+    }
+  },
+  "options": {
+    "step": {
+      "gps": {
+        "title": "GPS-Kalibrierung",
+        "description": "Aktualisiere Dock-Position und Rotationsoffset.",
+        "data": {
+          "dock_latitude": "Dock Breite",
+          "dock_longitude": "Dock Länge",
+          "rotation_offset_deg": "Rotationsoffset (Grad)",
+          "invert_y_axis": "Y-Achse invertieren",
+          "mode": "Kalibrierungsmodus"
+        }
+      },
+      "gps_two_point": {
+        "title": "2-Punkt-Kalibrierung",
+        "description": "Aktualisiere die automatische Skalierung und Rotation aus zwei Referenzpunkten.",
+        "data": {
+          "local_x1": "Punkt 1 lokal X",
+          "local_y1": "Punkt 1 lokal Y",
+          "real_lat1": "Punkt 1 Breite",
+          "real_lon1": "Punkt 1 Länge",
+          "local_x2": "Punkt 2 lokal X",
+          "local_y2": "Punkt 2 lokal Y",
+          "real_lat2": "Punkt 2 Breite",
+          "real_lon2": "Punkt 2 Länge"
+        }
+      }
+    },
+    "error": {
+      "invalid_gps": "Ungültige GPS-Kalibrierung"
     }
   }
 }

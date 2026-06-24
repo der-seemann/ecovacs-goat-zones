@@ -15,6 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
+from .coordinates import DEFAULT_SCALE, derive_two_point_calibration
 from . import DOMAIN
 
 CONF_MOWER_ENTITY_ID = "mower_entity_id"
@@ -25,6 +26,24 @@ CONF_IMAGE_PATH = "image_path"
 CONF_IMAGE_SOURCE_URL = "image_source_url"
 CONF_CALIBRATION = "calibration"
 CONF_TIME_WINDOW = "time_window"
+CONF_GPS_CALIBRATION = "gps_calibration"
+CONF_GPS_MODE = "mode"
+CONF_GPS_MODE_SIMPLE = "simple"
+CONF_GPS_MODE_TWO_POINT = "two_point"
+CONF_DOCK_LATITUDE = "dock_latitude"
+CONF_DOCK_LONGITUDE = "dock_longitude"
+CONF_ROTATION_OFFSET_DEG = "rotation_offset_deg"
+CONF_SCALE = "scale"
+CONF_INVERT_Y_AXIS = "invert_y_axis"
+CONF_GPS_ACCURACY = "gps_accuracy"
+CONF_LOCAL_X1 = "local_x1"
+CONF_LOCAL_Y1 = "local_y1"
+CONF_REAL_LAT1 = "real_lat1"
+CONF_REAL_LON1 = "real_lon1"
+CONF_LOCAL_X2 = "local_x2"
+CONF_LOCAL_Y2 = "local_y2"
+CONF_REAL_LAT2 = "real_lat2"
+CONF_REAL_LON2 = "real_lon2"
 DEVICE_DOMAIN = "lawn_mower"
 DEFAULT_IMAGE_FILENAME = "goaty_luftbild.jpg"
 DEFAULT_IMAGE_PATH = f"/local/{DEFAULT_IMAGE_FILENAME}"
@@ -41,6 +60,7 @@ DEFAULT_START_OFFSET = 30
 DEFAULT_END_MODE = "sun"
 DEFAULT_END_OFFSET = -60
 DEFAULT_RAIN_DELAY = 60
+DEFAULT_GPS_ACCURACY = 5.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +72,7 @@ class GoatyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._config: dict[str, Any] = {}
+        self._gps_base: dict[str, Any] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle the initial device selection step."""
@@ -292,7 +313,7 @@ class GoatyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "rain_delay_minutes": rain_delay,
                         "rain_sensor_entity": rain_sensor,
                     }
-                    return await self.async_step_finish()
+                    return await self.async_step_gps()
 
         time_window = self._config.get(CONF_TIME_WINDOW, {}) or {}
         data_schema = vol.Schema(
@@ -316,6 +337,97 @@ class GoatyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
         )
+
+    async def async_step_gps(self, user_input: dict[str, Any] | None = None):
+        """Collect GPS calibration settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                dock_latitude = float(user_input[CONF_DOCK_LATITUDE])
+                dock_longitude = float(user_input[CONF_DOCK_LONGITUDE])
+                rotation_offset_deg = float(user_input.get(CONF_ROTATION_OFFSET_DEG, 0.0) or 0.0)
+                gps_mode = str(user_input.get(CONF_GPS_MODE) or CONF_GPS_MODE_SIMPLE)
+            except (TypeError, ValueError):
+                errors["base"] = "invalid_gps"
+            else:
+                self._gps_base = {
+                    CONF_DOCK_LATITUDE: dock_latitude,
+                    CONF_DOCK_LONGITUDE: dock_longitude,
+                    CONF_ROTATION_OFFSET_DEG: rotation_offset_deg,
+                    CONF_INVERT_Y_AXIS: bool(user_input.get(CONF_INVERT_Y_AXIS, False)),
+                    CONF_GPS_MODE: gps_mode,
+                    CONF_GPS_ACCURACY: DEFAULT_GPS_ACCURACY,
+                }
+                if gps_mode == CONF_GPS_MODE_TWO_POINT:
+                    return await self.async_step_gps_two_point()
+
+                self._config[CONF_GPS_CALIBRATION] = {
+                    **self._gps_base,
+                    CONF_SCALE: DEFAULT_SCALE,
+                }
+                return await self.async_step_finish()
+
+        gps = self._config.get(CONF_GPS_CALIBRATION, {}) or {}
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_DOCK_LATITUDE, default=gps.get(CONF_DOCK_LATITUDE, "")): vol.Coerce(float),
+                vol.Required(CONF_DOCK_LONGITUDE, default=gps.get(CONF_DOCK_LONGITUDE, "")): vol.Coerce(float),
+                vol.Required(CONF_ROTATION_OFFSET_DEG, default=gps.get(CONF_ROTATION_OFFSET_DEG, 0.0)): vol.Coerce(float),
+                vol.Required(CONF_INVERT_Y_AXIS, default=gps.get(CONF_INVERT_Y_AXIS, False)): cv.boolean,
+                vol.Required(CONF_GPS_MODE, default=gps.get(CONF_GPS_MODE, CONF_GPS_MODE_SIMPLE)): vol.In(
+                    {
+                        CONF_GPS_MODE_SIMPLE: "Einfach: Dock + Rotation",
+                        CONF_GPS_MODE_TWO_POINT: "2-Punkt-Kalibrierung",
+                    }
+                ),
+            }
+        )
+        return self.async_show_form(step_id="gps", data_schema=data_schema, errors=errors)
+
+    async def async_step_gps_two_point(self, user_input: dict[str, Any] | None = None):
+        """Derive calibration from two known points."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                point1 = {
+                    "local_x": float(user_input[CONF_LOCAL_X1]),
+                    "local_y": float(user_input[CONF_LOCAL_Y1]),
+                    "latitude": float(user_input[CONF_REAL_LAT1]),
+                    "longitude": float(user_input[CONF_REAL_LON1]),
+                }
+                point2 = {
+                    "local_x": float(user_input[CONF_LOCAL_X2]),
+                    "local_y": float(user_input[CONF_LOCAL_Y2]),
+                    "latitude": float(user_input[CONF_REAL_LAT2]),
+                    "longitude": float(user_input[CONF_REAL_LON2]),
+                }
+                derived = derive_two_point_calibration(point1, point2)
+            except (KeyError, TypeError, ValueError):
+                errors["base"] = "invalid_gps"
+            else:
+                self._config[CONF_GPS_CALIBRATION] = {
+                    **self._gps_base,
+                    CONF_ROTATION_OFFSET_DEG: derived["rotation_offset_deg"],
+                    CONF_SCALE: derived["scale"],
+                    "points": [point1, point2],
+                }
+                return await self.async_step_finish()
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_LOCAL_X1): vol.Coerce(float),
+                vol.Required(CONF_LOCAL_Y1): vol.Coerce(float),
+                vol.Required(CONF_REAL_LAT1): vol.Coerce(float),
+                vol.Required(CONF_REAL_LON1): vol.Coerce(float),
+                vol.Required(CONF_LOCAL_X2): vol.Coerce(float),
+                vol.Required(CONF_LOCAL_Y2): vol.Coerce(float),
+                vol.Required(CONF_REAL_LAT2): vol.Coerce(float),
+                vol.Required(CONF_REAL_LON2): vol.Coerce(float),
+            }
+        )
+        return self.async_show_form(step_id="gps_two_point", data_schema=data_schema, errors=errors)
 
     async def async_step_finish(self, user_input: dict[str, Any] | None = None):
         """Finalize the config flow."""

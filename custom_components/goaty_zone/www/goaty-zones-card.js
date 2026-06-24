@@ -5,14 +5,14 @@ class GoatyZonesCard extends HTMLElement {
     this._config = {
       title: "Goaty",
       zones_entity: "sensor.goaty_zones",
-      mower_entity: "vacuum.goaty_map_proxy",
+      mower_entity: "lawn_mower.goaty",
       battery_entity: "sensor.goaty_batterie",
-      status_entity: "sensor.goaty_mahstatus",
-      fault_entity: "sensor.goaty_effektiver_fehler",
-      active_zone_entity: "input_text.goaty_current_zone_name",
-      zone_active_bool: "input_boolean.goaty_zone_active",
-      dock_domain: "vacuum",
-      dock_service: "return_to_base",
+      status_entity: "",
+      fault_entity: "sensor.goaty_fehler",
+      active_zone_entity: "input_select.goaty_mow_zone",
+      zone_active_bool: "",
+      dock_domain: "lawn_mower",
+      dock_service: "dock",
       mow_domain: "goaty_zone",
       mow_service: "mow_zone",
       reload_domain: "goaty_zone",
@@ -80,7 +80,11 @@ class GoatyZonesCard extends HTMLElement {
 
   _zoneActive() {
     const boolState = this._hass?.states?.[this._config.zone_active_bool];
-    return boolState?.state === "on";
+    if (boolState?.state === "on") {
+      return true;
+    }
+    const mowerState = String(this._hass?.states?.[this._config.mower_entity]?.state || "").toLowerCase();
+    return !["docked", "idle", "unknown", "unavailable", ""].includes(mowerState);
   }
 
   _battery() {
@@ -90,7 +94,10 @@ class GoatyZonesCard extends HTMLElement {
 
   _status() {
     const stateObj = this._hass?.states?.[this._config.status_entity];
-    return stateObj?.state || "";
+    if (stateObj?.state && stateObj.state !== "unknown" && stateObj.state !== "unavailable") {
+      return stateObj.state;
+    }
+    return this._hass?.states?.[this._config.mower_entity]?.state || "";
   }
 
   _fault() {

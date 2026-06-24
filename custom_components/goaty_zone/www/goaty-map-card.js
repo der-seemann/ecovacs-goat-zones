@@ -1,4 +1,4 @@
-const VERSION = "1.0.0";
+const VERSION = "2.0.0";
 
 const CSS = `
 :host {
@@ -68,7 +68,7 @@ ha-card {
   cursor: default;
 }
 .date {
-  min-width: 88px;
+  min-width: 104px;
   text-align: center;
   font-size: 12px;
   color: var(--secondary-text-color, #9ca3af);
@@ -88,7 +88,15 @@ ha-card {
 }
 `;
 
-class GoatyMapCard extends HTMLElement {
+function todayKey() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+class GoatyDayMapCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
@@ -101,12 +109,13 @@ class GoatyMapCard extends HTMLElement {
     this._apiConfig = null;
     this._img = null;
     this._path = [];
+    this._availableDates = [];
     this._viewDate = null;
     this._loading = false;
     this._refreshTimer = null;
     this._canvas = null;
     this._ctx = null;
-    console.info(`GOATY-MAP-CARD v${VERSION}`);
+    console.info(`GOATY-DAY-MAP-CARD v${VERSION}`);
   }
 
   setConfig(config) {
@@ -167,6 +176,7 @@ class GoatyMapCard extends HTMLElement {
 
     try {
       this._apiConfig = await this._requestJson("/api/goaty_zone/config");
+      this._availableDates = await this._loadAvailableDates();
       if (this._apiConfig?.image_path) {
         await this._loadImage(this._apiConfig.image_path);
       }
@@ -180,10 +190,20 @@ class GoatyMapCard extends HTMLElement {
         Math.max(5, this._config.position_update) * 1000,
       );
     } catch (err) {
-      console.error("GOATY-MAP-CARD init error", err);
+      console.error("GOATY-DAY-MAP-CARD init error", err);
       this._renderError(err?.message || String(err));
     } finally {
       this._loading = false;
+    }
+  }
+
+  async _loadAvailableDates() {
+    try {
+      const data = await this._requestJson("/api/goaty_zone/path/available_dates");
+      return Array.isArray(data?.dates) ? data.dates.filter(Boolean) : [];
+    } catch (err) {
+      console.warn("GOATY-DAY-MAP-CARD available dates unavailable", err);
+      return [];
     }
   }
 
@@ -219,6 +239,15 @@ class GoatyMapCard extends HTMLElement {
     this._ctx = this._canvas ? this._canvas.getContext("2d") : null;
   }
 
+  _scale() {
+    const scale = Number(this._apiConfig?.scale);
+    return Number.isFinite(scale) && scale > 0 ? scale : 0.001;
+  }
+
+  _invertYAxis() {
+    return Boolean(this._apiConfig?.invert_y_axis);
+  }
+
   _parseHeading(value) {
     const raw = Number(value);
     if (!Number.isFinite(raw)) {
@@ -227,16 +256,30 @@ class GoatyMapCard extends HTMLElement {
     return Math.abs(raw) > Math.PI * 2 ? (raw * Math.PI) / 180 : raw;
   }
 
-  _toPixel(xCm, yCm) {
+  _rawToMeters(xRaw, yRaw) {
+    const scale = this._scale();
+    const yValue = this._invertYAxis() ? -Number(yRaw) : Number(yRaw);
+    return {
+      x: Number(xRaw) * scale,
+      y: yValue * scale,
+    };
+  }
+
+  _metersToPixel(xMeters, yMeters) {
     const cfg = this._apiConfig || {};
     const width = this._canvas?.width || cfg.img_width || 1452;
     const height = this._canvas?.height || cfg.img_height || 2000;
     const scaleX = width / (cfg.img_width || width);
     const scaleY = height / (cfg.img_height || height);
     return {
-      x: ((Number(cfg.charger_px_x) || 0) + (Number(xCm) || 0) / 100 * (Number(cfg.px_per_m_x) || 22.48)) * scaleX,
-      y: ((Number(cfg.charger_px_y) || 0) - (Number(yCm) || 0) / 100 * (Number(cfg.px_per_m_y) || 22.48)) * scaleY,
+      x: ((Number(cfg.charger_px_x) || 0) + Number(xMeters) * (Number(cfg.px_per_m_x) || 22.48)) * scaleX,
+      y: ((Number(cfg.charger_px_y) || 0) - Number(yMeters) * (Number(cfg.px_per_m_y) || 22.48)) * scaleY,
     };
+  }
+
+  _rawToPixel(xRaw, yRaw) {
+    const meters = this._rawToMeters(xRaw, yRaw);
+    return this._metersToPixel(meters.x, meters.y);
   }
 
   _pathColor(fraction) {
@@ -247,22 +290,58 @@ class GoatyMapCard extends HTMLElement {
     return `rgb(${r}, ${g}, ${b})`;
   }
 
+  _selectedDateKey() {
+    return this._viewDate || todayKey();
+  }
+
+  _isTodaySelected() {
+    return !this._viewDate || this._viewDate === todayKey();
+  }
+
+  _formatDate(dateKey) {
+    if (!dateKey) {
+      return "Heute";
+    }
+    try {
+      const label = new Intl.DateTimeFormat("de-DE", {
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit",
+      }).format(new Date(`${dateKey}T12:00:00`));
+      return `${dateKey === todayKey() ? "Heute" : label}`;
+    } catch {
+      return dateKey;
+    }
+  }
+
   _currentPosition() {
     const cfg = this._apiConfig || {};
-    const xState = this._hass?.states?.[cfg.position_x_entity];
-    const yState = this._hass?.states?.[cfg.position_y_entity];
+    const tracker = this._hass?.states?.[cfg.position_tracker_entity || "device_tracker.goaty_position"];
+    const attrs = tracker?.attributes || {};
+    const x = Number(attrs.x_m);
+    const y = Number(attrs.y_m);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      return {
+        x_m: x,
+        y_m: y,
+        heading: this._parseHeading(attrs.heading),
+      };
+    }
+
+    const xState = this._hass?.states?.[cfg.position_x_m_entity];
+    const yState = this._hass?.states?.[cfg.position_y_m_entity];
     const hState = this._hass?.states?.[cfg.heading_entity];
     if (!xState || !yState) {
       return null;
     }
-    const x = Number(xState.state);
-    const y = Number(yState.state);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    const xMeters = Number(xState.state);
+    const yMeters = Number(yState.state);
+    if (!Number.isFinite(xMeters) || !Number.isFinite(yMeters)) {
       return null;
     }
     return {
-      x,
-      y,
+      x_m: xMeters,
+      y_m: yMeters,
       heading: this._parseHeading(hState?.state),
     };
   }
@@ -275,8 +354,8 @@ class GoatyMapCard extends HTMLElement {
     for (let i = 1; i < count; i += 1) {
       const a = this._path[i - 1];
       const b = this._path[i];
-      const pa = this._toPixel(a.x, a.y);
-      const pb = this._toPixel(b.x, b.y);
+      const pa = this._rawToPixel(a.x, a.y);
+      const pb = this._rawToPixel(b.x, b.y);
       ctx.beginPath();
       ctx.strokeStyle = this._pathColor(i / Math.max(1, count - 1));
       ctx.lineWidth = 3;
@@ -303,15 +382,18 @@ class GoatyMapCard extends HTMLElement {
     ctx.restore();
   }
 
-  _drawMower(ctx) {
+  _drawTracker(ctx) {
+    if (!this._isTodaySelected()) {
+      return;
+    }
     const position = this._currentPosition();
     if (!position) {
       return;
     }
-    const { x, y } = this._toPixel(position.x, position.y);
+    const { x, y } = this._metersToPixel(position.x_m, position.y_m);
     ctx.save();
     ctx.translate(x, y);
-    ctx.rotate(position.heading);
+    ctx.rotate(position.heading || 0);
     ctx.fillStyle = "rgba(239, 68, 68, 0.92)";
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 2;
@@ -319,13 +401,15 @@ class GoatyMapCard extends HTMLElement {
     ctx.arc(0, 0, 10, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(0, -15);
-    ctx.lineTo(-5, -7);
-    ctx.lineTo(5, -7);
-    ctx.closePath();
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
+    if (position.heading) {
+      ctx.beginPath();
+      ctx.moveTo(0, -15);
+      ctx.lineTo(-5, -7);
+      ctx.lineTo(5, -7);
+      ctx.closePath();
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+    }
     ctx.restore();
   }
 
@@ -350,7 +434,7 @@ class GoatyMapCard extends HTMLElement {
     }
     this._drawPath(ctx);
     this._drawCharger(ctx);
-    this._drawMower(ctx);
+    this._drawTracker(ctx);
   }
 
   _renderLoading() {
@@ -388,11 +472,79 @@ class GoatyMapCard extends HTMLElement {
       .replaceAll("'", "&#39;");
   }
 
+  _dateIndex(dateKey) {
+    return this._availableDates.indexOf(dateKey);
+  }
+
+  _latestPastDate() {
+    const today = todayKey();
+    for (let i = this._availableDates.length - 1; i >= 0; i -= 1) {
+      const candidate = this._availableDates[i];
+      if (candidate && candidate < today) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  _canGoPrevious() {
+    if (this._isTodaySelected()) {
+      return Boolean(this._latestPastDate());
+    }
+    return this._dateIndex(this._viewDate) > 0;
+  }
+
+  _canGoNext() {
+    return !this._isTodaySelected();
+  }
+
+  async _navigate(delta) {
+    const today = todayKey();
+    let nextDate = null;
+
+    if (delta < 0) {
+      if (!this._availableDates.length) {
+        return;
+      }
+      if (this._isTodaySelected()) {
+        nextDate = this._latestPastDate();
+      } else {
+        const index = this._dateIndex(this._viewDate);
+        if (index <= 0) {
+          return;
+        }
+        nextDate = this._availableDates[index - 1] || null;
+      }
+    } else if (delta > 0) {
+      if (this._isTodaySelected()) {
+        return;
+      }
+      const index = this._dateIndex(this._viewDate);
+      if (index >= 0 && index < this._availableDates.length - 1) {
+        nextDate = this._availableDates[index + 1] || null;
+      } else {
+        nextDate = today;
+      }
+    }
+
+    this._viewDate = nextDate && nextDate !== today ? nextDate : null;
+    this._render();
+    try {
+      await this._loadPath(this._viewDate);
+      this._draw();
+    } catch (err) {
+      console.warn("GOATY-DAY-MAP-CARD navigation path load failed", err);
+    }
+  }
+
   _render() {
     const cfg = this._apiConfig || {};
     const width = Number(cfg.img_width) || 1452;
     const height = Number(cfg.img_height) || 2000;
-    const dateLabel = this._viewDate || "Heute";
+    const dateLabel = this._formatDate(this._viewDate || todayKey());
+    const canPrev = this._canGoPrevious();
+    const canNext = this._canGoNext();
+
     this.shadowRoot.innerHTML = `
       <style>${CSS}</style>
       <ha-card>
@@ -403,9 +555,9 @@ class GoatyMapCard extends HTMLElement {
           </div>
           <div class="controls">
             <div class="nav">
-              <button id="prev" type="button">◀</button>
+              <button id="prev" type="button" ${canPrev ? "" : "disabled"}>◀ Vorheriger Tag</button>
               <div class="date">${this._escape(dateLabel)}</div>
-              <button id="next" type="button" ${this._viewDate ? "" : "disabled"}>▶</button>
+              <button id="next" type="button" ${canNext ? "" : "disabled"}>Nächster Tag ▶</button>
             </div>
             <div class="legend">
               <span>Älter</span>
@@ -424,33 +576,24 @@ class GoatyMapCard extends HTMLElement {
     this.shadowRoot.getElementById("next")?.addEventListener("click", () => this._navigate(+1));
   }
 
-  async _navigate(delta) {
-    const today = new Date();
-    let nextDate = this._viewDate ? new Date(`${this._viewDate}T00:00:00Z`) : new Date();
-    nextDate.setDate(nextDate.getDate() + delta);
-    const isToday = nextDate.toDateString() === today.toDateString();
-    this._viewDate = isToday ? null : nextDate.toISOString().slice(0, 10);
-    this._render();
-    try {
-      await this._loadPath(this._viewDate);
-      this._draw();
-    } catch (err) {
-      console.warn("GOATY-MAP-CARD navigation path load failed", err);
-    }
-  }
-
   static getStubConfig() {
     return { title: "Goaty Karte" };
   }
 }
 
-customElements.define("goaty-map-card", GoatyMapCard);
+if (!customElements.get("goaty-day-map-card")) {
+  customElements.define("goaty-day-map-card", GoatyDayMapCard);
+}
+
+if (!customElements.get("goaty-map-card")) {
+  customElements.define("goaty-map-card", GoatyDayMapCard);
+}
 
 window.customCards = window.customCards || [];
 window.customCards.push({
-  type: "goaty-map-card",
-  name: "Goaty Karte",
-  description: "Live-Karte mit Luftbild, Pfad und GOAT-Position",
+  type: "goaty-day-map-card",
+  name: "Goaty Day Map Card",
+  description: "Tageskarte mit Luftbild, Pfad und GOAT-Tracker.",
   preview: false,
   documentationURL: "https://github.com/der-seemann/ha-goaty",
 });

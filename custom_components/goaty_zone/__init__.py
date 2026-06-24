@@ -8,8 +8,9 @@ import logging
 import os
 import re
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import voluptuous as vol
@@ -23,8 +24,10 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .coordinator import GoatyCoordinator
+from .settings import get_entry_data
 
 DOMAIN = "goaty_zone"
 ECOVACS_DOMAIN = "ecovacs"
@@ -36,6 +39,7 @@ MAP_CARD_SOURCE = "custom_components/goaty_zone/www/goaty-map-card.js"
 STORAGE_KEY = "goaty_zone.zone_config"
 STORAGE_VERSION = 1
 POSITION_DUMP_PATH = Path("/config/goaty_position_live_last.json")
+ZONES_DUMP_PATH = Path("/config/goaty_zone_areas_last.json")
 ZONES_TEXT_ENTITY = "input_text.goaty_zones_json"
 ZONES_HASH_ENTITY = "input_text.goaty_zones_hash"
 ZONES_SELECT_ENTITY = "input_select.goaty_mow_zone"
@@ -226,6 +230,9 @@ async def _apply_goat_position_update(hass: HomeAssistant, position: dict[str, A
         for sensor in sensors.values():
             if hasattr(sensor, "set_position_data"):
                 sensor.set_position_data(position)
+        tracker = entry_data.get("position_tracker")
+        if hasattr(tracker, "set_position_data"):
+            tracker.set_position_data(position)
 
     await hass.async_add_executor_job(_write_goat_position_dump, position)
 
@@ -281,6 +288,27 @@ def _current_known_zone_entries() -> list[dict[str, str]]:
         zone_name = str(cfg.get("name") or zone_id).strip() or str(zone_id)
         zones.append({"id": str(zone_id), "name": zone_name})
     return sorted(zones, key=lambda zone: _zone_sort_key(zone["id"]))
+
+
+def _zone_snapshot_payload(
+    zones: list[dict[str, str]],
+    *,
+    device_info: dict[str, Any] | None = None,
+    source: str | None = None,
+    attempts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": source or DOMAIN,
+        "fetched_at": dt_util.utcnow().isoformat(),
+        "count": len(zones),
+        "zones": [dict(zone) for zone in zones],
+        "device_info": dict(device_info or {}),
+        "attempts": list(attempts or []),
+    }
+
+
+def _write_zone_areas_dump(snapshot: dict[str, Any]) -> None:
+    ZONES_DUMP_PATH.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, default=str))
 
 
 async def _learn_zone_from_clean_info(hass: HomeAssistant, zone_id: str, zone_name: str | None) -> bool:
@@ -442,11 +470,37 @@ class GoatyConfigView(HomeAssistantView):
                 "px_per_m_y": cal.get("px_per_m_y", 22.48),
                 "img_width": cal.get("img_width", 1452),
                 "img_height": cal.get("img_height", 2000),
+                "scale": cal.get("scale", 0.001),
+                "invert_y_axis": bool(cal.get("invert_y_axis", False)),
+                "position_tracker_entity": "device_tracker.goaty_position",
                 "position_x_entity": "sensor.goaty_position_x",
                 "position_y_entity": "sensor.goaty_position_y",
                 "heading_entity": "sensor.goaty_position_heading",
+                "position_x_m_entity": "sensor.goaty_position_x_m",
+                "position_y_m_entity": "sensor.goaty_position_y_m",
+                "position_direction_entity": "sensor.goaty_position_direction",
             }
         )
+
+
+def _goaty_path_bounds(date_str: str | None, hours_raw: Any) -> tuple[datetime, datetime] | None:
+    if date_str:
+        try:
+            day = date.fromisoformat(str(date_str))
+        except ValueError:
+            return None
+        local_tz = dt_util.now().tzinfo or timezone.utc
+        start = datetime.combine(day, time.min, tzinfo=local_tz)
+        end = datetime.combine(day, time.max, tzinfo=local_tz)
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+    try:
+        hours = max(1, int(hours_raw))
+    except (TypeError, ValueError):
+        hours = 24
+    end = dt_util.now()
+    start = end - timedelta(hours=hours)
+    return start, end
 
 
 class GoatyPathView(HomeAssistantView):
@@ -466,23 +520,10 @@ class GoatyPathView(HomeAssistantView):
         params = request.rel_url.query
         hours_raw = params.get("hours", 24)
         date_str = params.get("date")
-        try:
-            hours = max(1, int(hours_raw))
-        except (TypeError, ValueError):
-            hours = 24
-
-        if date_str:
-            try:
-                day = datetime.fromisoformat(str(date_str))
-            except ValueError:
-                return self.json({"error": "invalid date"}, status_code=400)
-            if day.tzinfo is None:
-                day = day.replace(tzinfo=timezone.utc)
-            start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-            end = day.replace(hour=23, minute=59, second=59, microsecond=999999)
-        else:
-            end = datetime.now(timezone.utc)
-            start = end - timedelta(hours=hours)
+        bounds = _goaty_path_bounds(date_str, hours_raw)
+        if bounds is None:
+            return self.json({"error": "invalid date"}, status_code=400)
+        start, end = bounds
 
         entity_ids = [
             "sensor.goaty_position_x",
@@ -557,6 +598,65 @@ class GoatyPathView(HomeAssistantView):
                 "count": len(points),
                 "start": start.isoformat(),
                 "end": end.isoformat(),
+            }
+        )
+
+
+class GoatyPathAvailableDatesView(HomeAssistantView):
+    """GET /api/goaty_zone/path/available_dates."""
+
+    url = "/api/goaty_zone/path/available_dates"
+    name = "api:goaty_zone:path_available_dates"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: Any) -> Any:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import get_significant_states
+
+        end = dt_util.now()
+        start = end - timedelta(days=180)
+        entity_ids = [
+            "sensor.goaty_position_x",
+            "sensor.goaty_position_y",
+            "sensor.goaty_position_heading",
+        ]
+
+        try:
+            recorder = get_instance(self._hass)
+            history = await recorder.async_add_executor_job(
+                get_significant_states,
+                self._hass,
+                start,
+                end,
+                entity_ids,
+                None,
+                True,
+                False,
+                False,
+            )
+        except Exception:
+            _LOGGER.debug("Goaty path available_dates history unavailable", exc_info=True)
+            return self.json({"dates": [], "count": 0, "oldest": None, "newest": None})
+
+        dates: set[str] = set()
+        for state in history.get("sensor.goaty_position_x", []):
+            if state.state in ("unknown", "unavailable", None):
+                continue
+            ts = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
+            if ts is None:
+                continue
+            dates.add(dt_util.as_local(ts).date().isoformat())
+
+        ordered_dates = sorted(dates)
+        return self.json(
+            {
+                "dates": ordered_dates,
+                "count": len(ordered_dates),
+                "oldest": ordered_dates[0] if ordered_dates else None,
+                "newest": ordered_dates[-1] if ordered_dates else None,
             }
         )
 
@@ -700,29 +800,77 @@ class GoatyZoneStore:
     def get_all(self) -> dict[str, dict[str, Any]]:
         return {zone_id: dict(config) for zone_id, config in self._data.items()}
 
-    async def async_sync_zone_defaults(self, zones: list[dict[str, str]]) -> bool:
-        changed = False
+    async def async_replace_zones(self, zones: list[dict[str, str]]) -> bool:
+        normalized_zones: list[dict[str, str]] = []
         for zone in zones:
-            zone_id = str(zone["id"]).strip()
-            zone_name = str(zone["name"]).strip()
-            if not zone_id or not zone_name:
-                continue
-            current = self._data.get(zone_id)
-            if current is None:
-                self._data[zone_id] = self._default_config(zone_id, zone_name)
+            zone_id = str(zone.get("id") or "").strip()
+            zone_name = str(zone.get("name") or "").strip()
+            if zone_id and zone_name:
+                normalized_zones.append({"id": zone_id, "name": zone_name})
+
+        normalized_zones = sorted(normalized_zones, key=lambda zone: _zone_sort_key(zone["id"]))
+        current_data = self.get_all()
+
+        if not normalized_zones:
+            if current_data:
+                self._data = {}
+                await self.async_save()
+                return True
+            return False
+
+        name_index: dict[str, list[str]] = {}
+        for zone_id, cfg in current_data.items():
+            zone_name = str(cfg.get("name") or "").strip().casefold()
+            if zone_name:
+                name_index.setdefault(zone_name, []).append(zone_id)
+
+        new_data: dict[str, dict[str, Any]] = {}
+        changed = False
+        used_old_ids: set[str] = set()
+
+        for zone in normalized_zones:
+            zone_id = zone["id"]
+            zone_name = zone["name"]
+            existing = current_data.get(zone_id)
+
+            if existing is None:
+                candidates = [old_id for old_id in name_index.get(zone_name.casefold(), []) if old_id not in used_old_ids]
+                if len(candidates) == 1:
+                    old_id = candidates[0]
+                    existing = dict(current_data.get(old_id, {}))
+                    used_old_ids.add(old_id)
+                    changed = True
+                    _LOGGER.info("GOAT zone id migrated by name: %s -> %s (%s)", old_id, zone_id, zone_name)
+
+            if existing is None:
+                new_data[zone_id] = self._default_config(zone_id, zone_name)
                 changed = True
                 continue
 
-            if current.get("name") != zone_name:
-                current["name"] = zone_name
+            updated = dict(existing)
+            if updated.get("name") != zone_name:
+                updated["name"] = zone_name
                 changed = True
-            for key, value in self._default_config(zone_id, zone_name).items():
-                if key not in current:
-                    current[key] = value
+
+            default_cfg = self._default_config(zone_id, zone_name)
+            for key, value in default_cfg.items():
+                if key not in updated:
+                    updated[key] = value
                     changed = True
-        if changed:
+
+            new_data[zone_id] = updated
+
+        if set(current_data) != set(new_data):
+            changed = True
+
+        if changed or new_data != current_data:
+            self._data = new_data
             await self.async_save()
-        return changed
+            return True
+        return False
+
+    async def async_sync_zone_defaults(self, zones: list[dict[str, str]]) -> bool:
+        return await self.async_replace_zones(zones)
 
     async def async_update(self, zone_id: str, **kwargs: Any) -> dict[str, Any]:
         zid = str(zone_id).strip()
@@ -950,7 +1098,10 @@ def _extract_zones_from_response(raw: Any) -> list[dict[str, str]]:
     return []
 
 
-async def _fetch_zones_from_device(hass: HomeAssistant, device: Any) -> list[dict[str, str]]:
+async def _fetch_zones_from_device(
+    hass: HomeAssistant,
+    device: Any,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
     from deebot_client.commands.json.custom import CustomCommand
 
     commands: list[tuple[str, Any]] = [("getAreaSet", CustomCommand("getAreaSet"))]
@@ -974,9 +1125,14 @@ async def _fetch_zones_from_device(hass: HomeAssistant, device: Any) -> list[dic
             result = await device.execute_command(command)
             raw = result if isinstance(result, dict) else getattr(result, "raw_response", result)
             zones = _extract_zones_from_response(raw)
-            attempts.append({"label": label, "zones": zones})
+            attempts.append({"label": label, "zones": zones, "raw_response": raw})
             if zones:
-                return zones
+                return zones, _zone_snapshot_payload(
+                    zones,
+                    device_info=dict(getattr(device, "device_info", {}) or {}),
+                    source=label,
+                    attempts=attempts,
+                )
         except Exception as exc:
             attempts.append({"label": label, "error": repr(exc)})
 
@@ -984,7 +1140,7 @@ async def _fetch_zones_from_device(hass: HomeAssistant, device: Any) -> list[dic
 
 
 def _load_cached_zones_from_dump() -> list[dict[str, str]]:
-    dump_path = Path("/config/goaty_zone_areas_last.json")
+    dump_path = ZONES_DUMP_PATH
     if not dump_path.exists():
         return []
 
@@ -993,6 +1149,11 @@ def _load_cached_zones_from_dump() -> list[dict[str, str]]:
     except Exception:
         _LOGGER.exception("Failed to read cached GOAT zones dump")
         return []
+
+    if isinstance(payload, dict):
+        zones = _extract_zones_from_response(payload.get("zones"))
+        if zones:
+            return zones
 
     zones = _extract_zones_from_response(payload)
     if zones:
@@ -1003,7 +1164,7 @@ def _load_cached_zones_from_dump() -> list[dict[str, str]]:
         for attempt in attempts:
             if not isinstance(attempt, dict):
                 continue
-            zones = _extract_zones_from_response(attempt.get("decoded_subsets"))
+            zones = _extract_zones_from_response(attempt.get("zones"))
             if zones:
                 return zones
             zones = _extract_zones_from_response(attempt.get("raw_response"))
@@ -1132,42 +1293,12 @@ def _build_dashboard(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     mower_entity_id = str(config.get("mower_entity_id") or "").strip() or "lawn_mower.goaty"
-    mowing_window_entity = _preferred_state_entity(
-        hass,
-        "binary_sensor.goaty_mahfenster_aktiv",
-        "sensor.goaty_mahfenster",
-    )
-    due_zones_entity = _preferred_state_entity(
-        hass,
-        "sensor.goaty_fallige_zonen_2",
-        "sensor.goaty_fallige_zones",
-    )
-    locked_zones_entity = _preferred_state_entity(
-        hass,
-        "sensor.goaty_gesperrte_zonen_2",
-        "sensor.goaty_gesperrte_zones",
-    )
-    mower_status_entity = _preferred_state_entity(
-        hass,
-        "sensor.goaty_mahstatus_2",
-        "sensor.goaty_mahstatus",
-    )
-    mower_fault_entity = _preferred_state_entity(
-        hass,
-        "sensor.goaty_fehler",
-        "sensor.goaty_effektiver_fehler",
-    )
     active_zone_entity = _preferred_state_entity(
         hass,
-        "input_text.goaty_current_zone_name",
-        "input_text.goaty_last_started_zone_name",
+        "input_select.goaty_mow_zone",
+        "select.goaty_mahzone",
     )
-    enriched_zones = (
-        [{"id": str(zone_id), **dict(zone)} for zone_id, zone in config.get("zones_map", {}).items()]
-        if isinstance(config.get("zones_map"), dict)
-        else zones
-    )
-    zone_cards = [_zone_summary_card(zone) for zone in enriched_zones] or [
+    zone_cards = [_zone_summary_card(zone) for zone in zones] or [
         {
             "type": "markdown",
             "content": "Noch keine Zonen vorhanden. Erst Zonen abrufen, dann Dashboard neu bauen.",
@@ -1195,7 +1326,7 @@ def _build_dashboard(
                         "title": "Steuerung",
                         "cards": [
                             {
-                                "type": "custom:goaty-map-card",
+                                "type": "custom:goaty-day-map-card",
                                 "title": title,
                                 "hours": 24,
                                 "position_update": 15,
@@ -1206,10 +1337,11 @@ def _build_dashboard(
                                 "zones_entity": "sensor.goaty_zones",
                                 "mower_entity": mower_entity_id,
                                 "battery_entity": "sensor.goaty_batterie",
-                                "status_entity": mower_status_entity,
-                                "fault_entity": mower_fault_entity,
+                                "status_entity": mower_entity_id,
+                                "fault_entity": "sensor.goaty_fehler",
                                 "active_zone_entity": active_zone_entity,
-                                "zone_active_bool": "input_boolean.goaty_zone_active",
+                                "dock_domain": "lawn_mower",
+                                "dock_service": "dock",
                                 "mow_domain": DOMAIN,
                                 "mow_service": "mow_zone",
                                 "reload_domain": DOMAIN,
@@ -1226,19 +1358,11 @@ def _build_dashboard(
                                 "cards": [
                                     {
                                         "type": "entities",
-                                        "title": "Gezielt mähen",
+                                        "title": "Direkt",
                                         "show_header_toggle": False,
                                         "entities": [
                                             "select.goaty_mahzone",
                                             "select.goaty_mahrichtung",
-                                            {
-                                                "entity": "input_boolean.goaty_mowing_auto_enabled",
-                                                "name": "Automatik",
-                                            },
-                                            {
-                                                "entity": active_zone_entity,
-                                                "name": "Aktive Zone",
-                                            },
                                         ],
                                     },
                                     {
@@ -1276,28 +1400,37 @@ def _build_dashboard(
                         "cards": [
                             {
                                 "type": "entities",
-                                "title": "Mähautomatik",
+                                "title": "Übersicht",
                                 "show_header_toggle": False,
                                 "entities": [
-                                    {"entity": mowing_window_entity, "name": "Mähfenster"},
-                                    {"entity": due_zones_entity, "name": "Fällige Zonen"},
-                                    {"entity": locked_zones_entity, "name": "Gesperrte Zonen"},
-                                    {"entity": mower_status_entity, "name": "Status"},
-                                    {"entity": "sensor.goaty_position_x", "name": "Position X"},
-                                    {"entity": "sensor.goaty_position_y", "name": "Position Y"},
-                                    {"entity": "sensor.goaty_position_heading", "name": "Heading"},
+                                    {"entity": "lawn_mower.goaty", "name": "Status"},
+                                    {"entity": "sensor.goaty_batterie", "name": "Batterie"},
+                                    {"entity": "sensor.goaty_fehler", "name": "Fehler"},
+                                    {"entity": "sensor.goaty_mahfenster", "name": "Mähfenster"},
+                                    {"entity": "sensor.goaty_position_x_m", "name": "X in Metern"},
+                                    {"entity": "sensor.goaty_position_y_m", "name": "Y in Metern"},
+                                    {"entity": "sensor.goaty_position_direction", "name": "Richtung"},
                                 ],
                             },
+                        ],
+                    },
+                    {
+                        "type": "grid",
+                        "title": "Live-Trail",
+                        "cards": [
                             {
-                                "type": "entities",
-                                "title": "Wartung",
-                                "show_header_toggle": False,
+                                "type": "map",
                                 "entities": [
-                                    {"entity": "input_text.goaty_current_zone_name", "name": "Aktive Zone"},
-                                    {"entity": "input_text.goaty_current_zone_id", "name": "Aktive Zone ID"},
-                                    {"entity": "input_boolean.goaty_zone_active", "name": "Zonenmodus"},
+                                    {
+                                        "entity": "device_tracker.goaty_position",
+                                        "name": title,
+                                        "color": "pink",
+                                        "label_mode": "attribute",
+                                    }
                                 ],
-                            },
+                                "hours_to_show": 24,
+                                "theme_mode": "auto",
+                            }
                         ],
                     },
                     {
@@ -1421,6 +1554,7 @@ async def _store_zones(
     *,
     force_update: bool,
     context: Any | None = None,
+    zone_dump: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     normalized_zones = sorted(zones, key=lambda zone: _zone_sort_key(zone["id"]))
     new_hash = _zones_hash(normalized_zones)
@@ -1444,12 +1578,21 @@ async def _store_zones(
     )
 
     if ZONE_STORE is not None:
-        await ZONE_STORE.async_sync_zone_defaults(normalized_zones)
+        await ZONE_STORE.async_replace_zones(normalized_zones)
     if GOATY_SENSOR is not None:
         GOATY_SENSOR.update_zones(normalized_zones, new_hash)
         if ZONE_STORE is not None:
             GOATY_SENSOR.update_zone_config(ZONE_STORE.get_all())
     _apply_sensor_state(hass, normalized_zones, new_hash)
+    try:
+        snapshot = zone_dump or _zone_snapshot_payload(normalized_zones, source=DOMAIN, attempts=[])
+        snapshot["hash"] = new_hash
+        snapshot["count"] = len(normalized_zones)
+        snapshot["zones"] = [dict(zone) for zone in normalized_zones]
+        snapshot["zone_config"] = ZONE_STORE.get_all() if ZONE_STORE is not None else {}
+        _write_zone_areas_dump(snapshot)
+    except Exception:
+        _LOGGER.exception("Failed to write GOAT zone dump")
     await _notify_zone_update_callbacks(hass, normalized_zones)
 
     await _notify_zone_update(hass, changed=changed, zones=normalized_zones, new_hash=new_hash)
@@ -1465,8 +1608,9 @@ async def _handle_get_zones_impl(
     device_name = str(call.data.get("device_name") or _configured_device_name(hass)).strip()
     device = _find_device(hass, device_name)
     source = "device"
+    zone_dump: dict[str, Any] | None = None
     try:
-        zones = await _fetch_zones_from_device(hass, device)
+        zones, zone_dump = await _fetch_zones_from_device(hass, device)
     except Exception as exc:
         _LOGGER.warning("GOAT zone fetch failed from device, trying cached dump: %s", exc)
         zones = await _load_cached_zones_from_dump_async(hass)
@@ -1478,6 +1622,7 @@ async def _handle_get_zones_impl(
         zones,
         force_update=force_update,
         context=call.context,
+        zone_dump=zone_dump,
     )
     _LOGGER.info(
         "GOAT zones %s from %s (%s, hash=%s, count=%d)",
@@ -1548,19 +1693,11 @@ async def _handle_mow_zone_impl(hass: HomeAssistant, call: ServiceCall) -> None:
             blocking=True,
             context=call.context,
         )
-    if zone_name and hass.states.get("input_text.goaty_current_zone_name") is not None:
+    if zone_name and hass.states.get("input_select.goaty_mow_zone") is not None:
         await hass.services.async_call(
-            "input_text",
-            "set_value",
-            {"entity_id": "input_text.goaty_current_zone_name", "value": zone_name},
-            blocking=True,
-            context=call.context,
-        )
-    if hass.states.get("input_boolean.goaty_zone_active") is not None:
-        await hass.services.async_call(
-            "input_boolean",
-            "turn_on",
-            {"entity_id": "input_boolean.goaty_zone_active"},
+            "input_select",
+            "select_option",
+            {"entity_id": "input_select.goaty_mow_zone", "option": zone_name},
             blocking=True,
             context=call.context,
         )
@@ -1571,7 +1708,7 @@ async def _restore_sensor_from_cache(hass: HomeAssistant) -> None:
     if cached:
         new_hash = _zones_hash(cached)
         if ZONE_STORE is not None:
-            await ZONE_STORE.async_sync_zone_defaults(cached)
+            await ZONE_STORE.async_replace_zones(cached)
         if GOATY_SENSOR is not None and GOATY_SENSOR.hass is not None:
             GOATY_SENSOR.update_zones(cached, new_hash)
             if ZONE_STORE is not None:
@@ -1617,7 +1754,7 @@ async def _refresh_sensor_from_known_zones(hass: HomeAssistant) -> None:
         zones = await _load_cached_zones_from_dump_async(hass)
 
     if zones and ZONE_STORE is not None:
-        await ZONE_STORE.async_sync_zone_defaults(zones)
+        await ZONE_STORE.async_replace_zones(zones)
         if GOATY_SENSOR is not None:
             GOATY_SENSOR.update_zone_config(ZONE_STORE.get_all())
         _apply_sensor_state(hass, zones, _zones_hash(zones))
@@ -1726,14 +1863,23 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     await _register_goaty_card_resources(hass)
     hass.http.register_view(GoatyConfigView(hass))
     hass.http.register_view(GoatyPathView(hass))
+    hass.http.register_view(GoatyPathAvailableDatesView(hass))
 
     await _restore_sensor_from_cache(hass)
 
     async def handle_get_zones(call: ServiceCall) -> None:
         await _handle_get_zones_impl(hass, call, force_update=True)
 
+    async def _background_reload_zones(service_data: dict[str, Any], context: Any) -> None:
+        try:
+            background_call = SimpleNamespace(data=service_data, context=context)
+            await _handle_get_zones_impl(hass, background_call, force_update=True)
+        except Exception:
+            _LOGGER.exception("GOAT reload_zones background refresh failed")
+
     async def handle_reload_zones(call: ServiceCall) -> None:
-        await _handle_get_zones_impl(hass, call, force_update=False)
+        # Reload should always refetch from the device and refresh the visible zone state.
+        await _background_reload_zones(dict(call.data), call.context)
 
     async def handle_mow_zone(call: ServiceCall) -> None:
         await _handle_mow_zone_impl(hass, call)
@@ -1841,7 +1987,6 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
                     break
         zones_map = ZONE_STORE.get_all()
         zones = [{"id": zone_id, **dict(zone)} for zone_id, zone in zones_map.items()]
-        config["zones_map"] = zones_map
         dashboard = _build_dashboard(hass, title, slug, zones, config)
         existing = await _load_existing_dashboard(hass, slug)
         if existing and not overwrite:
@@ -1994,7 +2139,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "zone_store": ZONE_STORE,
     }
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
-        "config": dict(entry.data),
+        "config": get_entry_data(entry),
         "coordinator": coordinator,
         "store": ZONE_STORE,
         "position": position,
@@ -2002,7 +2147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
     await hass.config_entries.async_forward_entry_setups(
         entry,
-        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON],
+        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON, Platform.DEVICE_TRACKER],
     )
     return True
 
@@ -2011,7 +2156,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(
         entry,
-        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON],
+        [Platform.SENSOR, Platform.SELECT, Platform.SWITCH, Platform.BUTTON, Platform.DEVICE_TRACKER],
     )
     domain_data = hass.data.get(DOMAIN)
     if isinstance(domain_data, dict):

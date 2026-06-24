@@ -1,7 +1,7 @@
 {
   "domain": "goaty_zone",
   "name": "Ecovacs GOAT Zones",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "config_flow": true,
   "documentation": "https://github.com/der-seemann/ecovacs-goat-zones",
   "issue_tracker": "https://github.com/der-seemann/ecovacs-goat-zones/issues",
@@ -9,5 +9,5 @@
   "dependencies": ["ecovacs"],
   "codeowners": ["@der-seemann"],
   "iot_class": "cloud_polling",
-  "platforms": ["sensor", "switch", "select", "button"]
+  "platforms": ["sensor", "switch", "select", "button", "device_tracker"]
 }

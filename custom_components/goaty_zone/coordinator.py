@@ -10,6 +10,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .settings import get_entry_data
+
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "goaty_zone"
 
@@ -26,10 +28,10 @@ class GoatyCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._entry = config_entry
         self._store = zone_store
-        self._cfg = dict(config_entry.data)
-        self._options = dict(config_entry.options)
+        self._cfg = get_entry_data(config_entry)
 
     async def _async_update_data(self) -> dict[str, Any]:
+        self._cfg = get_entry_data(self._entry)
         zones = self._get_zones_list()
         window = self._calc_window()
         rain_active = self._check_rain()
